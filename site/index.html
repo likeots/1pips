@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>One Pip Stop Sensitivity Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Сравнение базового стопа и стопа +1 пипс</h1>
+      <p class="note">Данные обновляются после запуска симулятора <code>one_pip_stop_sensitivity.py</code>.</p>
+    </header>
+
+    <section id="overview" class="card">
+      <h2>Итоги симуляции</h2>
+      <div class="grid">
+        <div class="stat">
+          <span class="label">Трейдов после фильтров</span>
+          <span class="value" id="trades-kept">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">Win-rate (база)</span>
+          <span class="value" id="base-wr">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">Win-rate (+1 пипс)</span>
+          <span class="value" id="plus-wr">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">Δ win-rate</span>
+          <span class="value" id="delta-wr">—</span>
+        </div>
+        <div class="stat">
+          <span class="label">McNemar p-value</span>
+          <span class="value" id="p-value">—</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="filters" class="card">
+      <h2>Параметры фильтров</h2>
+      <table>
+        <tbody>
+          <tr><th>Min RR</th><td id="min-rr">—</td></tr>
+          <tr><th>Min SL (пипсов)</th><td id="min-sl">—</td></tr>
+          <tr><th>Min TP (пипсов)</th><td id="min-tp">—</td></tr>
+          <tr><th>TP режим</th><td id="tp-mode">—</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="direction" class="card">
+      <h2>Разбивка по направлению</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Направление</th>
+            <th>Сделок</th>
+            <th>Win-rate (база)</th>
+            <th>Win-rate (+1 пипс)</th>
+          </tr>
+        </thead>
+        <tbody id="direction-body">
+          <tr><td colspan="4" class="empty">Нет данных</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card" id="data-status">
+      <h2>Статус данных</h2>
+      <p id="status-message">Загрузка...</p>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
