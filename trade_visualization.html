@@ -87,11 +87,25 @@
       transition: border-color 0.2s ease, box-shadow 0.2s ease;
     }
 
+    .control input[type="file"] {
+      padding: 0.4rem 0.8rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px dashed rgba(100, 116, 139, 0.5);
+      cursor: pointer;
+    }
+
     .control input:focus,
     .control select:focus {
       outline: none;
       border-color: rgba(99, 102, 241, 0.65);
       box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+    }
+
+    .control .control-help {
+      text-transform: none;
+      letter-spacing: normal;
+      font-size: 0.75rem;
+      color: rgba(148, 163, 184, 0.65);
     }
 
     .summary {
@@ -149,6 +163,22 @@
       display: grid;
       gap: 1.2rem;
       transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .notice {
+      margin: 0;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(148, 163, 184, 0.75);
+    }
+
+    .notice[data-tone="error"] {
+      color: #fca5a5;
+    }
+
+    .notice[data-tone="success"] {
+      color: #86efac;
     }
 
     .trade-card:hover {
@@ -394,6 +424,11 @@
         <input id="searchInput" type="search" placeholder="Trade id, date (YYYY-MM-DD)" />
       </label>
       <label class="control">
+        Data file
+        <input id="fileInput" type="file" accept=".csv" />
+        <span class="control-help">Use if the CSV does not load automatically.</span>
+      </label>
+      <label class="control">
         Sort by
         <select id="sortSelect">
           <option value="time-desc">Newest first</option>
@@ -405,6 +440,8 @@
         </select>
       </label>
     </section>
+
+    <p id="dataStatus" class="notice">Loading trade data…</p>
 
     <section class="summary" id="summary"></section>
 
@@ -421,9 +458,21 @@
     const resultFilter = document.getElementById('resultFilter');
     const searchInput = document.getElementById('searchInput');
     const sortSelect = document.getElementById('sortSelect');
+    const fileInput = document.getElementById('fileInput');
     const tradeList = document.getElementById('tradeList');
     const summaryEl = document.getElementById('summary');
+    const dataStatus = document.getElementById('dataStatus');
     let trades = [];
+
+    const setStatus = (message, tone = 'info') => {
+      if (!dataStatus) return;
+      dataStatus.textContent = message;
+      if (tone === 'info') {
+        delete dataStatus.dataset.tone;
+      } else {
+        dataStatus.dataset.tone = tone;
+      }
+    };
 
     const formatNumber = (value, digits = 5) => {
       if (typeof value !== 'number' || Number.isNaN(value)) return '—';
@@ -533,6 +582,11 @@
     };
 
     const renderSummary = (summary, totalCount) => {
+      if (!totalCount) {
+        summaryEl.innerHTML = '<p class="no-data">Load a CSV file to see trade metrics.</p>';
+        return;
+      }
+
       if (!summary) {
         summaryEl.innerHTML = '<p class="no-data">No trades match the current filters.</p>';
         return;
@@ -557,7 +611,11 @@
 
     const renderTrades = (collection) => {
       if (!collection.length) {
-        tradeList.innerHTML = '<p class="no-data">No trades match the current filters. Try broadening your search.</p>';
+        if (!trades.length) {
+          tradeList.innerHTML = '<p class="no-data">Load a CSV file to explore simulated trades.</p>';
+        } else {
+          tradeList.innerHTML = '<p class="no-data">No trades match the current filters. Try broadening your search.</p>';
+        }
         renderSummary(null, trades.length);
         return;
       }
@@ -601,7 +659,6 @@
 
         card.appendChild(stats);
         card.appendChild(createPriceTrack(trade));
-        tradeList.appendChild(card);
         fragment.appendChild(card);
       });
 
@@ -648,16 +705,41 @@
       renderTrades(filtered);
     };
 
-    const boot = async () => {
+    const loadTradesFromText = (text, sourceLabel) => {
       try {
-        const response = await fetch('one_pip_results_detailed.csv');
-        if (!response.ok) throw new Error('Unable to load CSV file');
-        const text = await response.text();
-        trades = parseCsv(text).map(decorateTrade);
+        const parsed = parseCsv(text);
+        trades = parsed.map(decorateTrade);
+
+        if (!trades.length) {
+          setStatus(`No trades found in ${sourceLabel}.`, 'error');
+          renderTrades([]);
+          return;
+        }
+
+        setStatus(`Loaded ${trades.length} trades from ${sourceLabel}.`, 'success');
         filterTrades();
       } catch (error) {
         console.error(error);
-        tradeList.innerHTML = `<p class="no-data">Failed to load data: ${error.message}</p>`;
+        setStatus(`Failed to parse ${sourceLabel}: ${error.message}`, 'error');
+        if (!trades.length) {
+          tradeList.innerHTML = `<p class="no-data">Failed to parse data: ${error.message}</p>`;
+          renderSummary(null, trades.length);
+        }
+      }
+    };
+
+    const boot = async () => {
+      try {
+        setStatus('Loading bundled trade data…');
+        const response = await fetch('one_pip_results_detailed.csv');
+        if (!response.ok) throw new Error('Unable to load CSV file');
+        const text = await response.text();
+        loadTradesFromText(text, 'one_pip_results_detailed.csv');
+      } catch (error) {
+        console.error(error);
+        setStatus('Automatic load failed. Use the data file picker to choose your CSV.', 'error');
+        tradeList.innerHTML = '<p class="no-data">Unable to load the CSV automatically. Use the "Data file" control above to choose <code>one_pip_results_detailed.csv</code>.</p>';
+        summaryEl.innerHTML = '<p class="no-data">Waiting for CSV file…</p>';
       }
     };
 
@@ -665,6 +747,25 @@
     resultFilter.addEventListener('change', filterTrades);
     searchInput.addEventListener('input', filterTrades);
     sortSelect.addEventListener('change', filterTrades);
+
+    if (fileInput) {
+      fileInput.addEventListener('change', (event) => {
+        const [file] = event.target.files || [];
+        if (!file) return;
+
+        const reader = new FileReader();
+        setStatus(`Reading ${file.name}…`);
+        reader.onload = () => {
+          loadTradesFromText(reader.result, file.name);
+        };
+        reader.onerror = () => {
+          console.error(reader.error);
+          setStatus(`Failed to read ${file.name}.`, 'error');
+        };
+        reader.readAsText(file);
+        event.target.value = '';
+      });
+    }
 
     boot();
   </script>
