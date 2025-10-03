@@ -24,6 +24,7 @@ Requires: pandas, tqdm, smartmoneyconcepts; local smc_adapter_josh.py
 import argparse
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from smc_adapter_josh import generate_entries_with_josh
@@ -50,7 +51,8 @@ def mcnemar_exact(b: int, c: int) -> float:
 
 
 def simulate_until_exit(
-    ticks: pd.DataFrame,
+    bids: np.ndarray,
+    asks: np.ndarray,
     entry_idx: int,
     direction: int,
     stop_price: float,
@@ -59,22 +61,34 @@ def simulate_until_exit(
     """
     Long: exit on BID (TP if bid>=tp, SL if bid<=sl)
     Short: exit on ASK (TP if ask<=tp, SL if ask>=sl)
+    Returns True if TP is hit before SL, False otherwise.
     """
     if direction not in (+1, -1):
         raise ValueError("direction must be +1 or -1")
-    if entry_idx < 0 or entry_idx >= len(ticks) - 1:
+
+    start = entry_idx + 1
+    if start >= len(bids):
         return False
 
-    for i in range(entry_idx + 1, len(ticks)):
-        bid = ticks.iloc[i]["bid"]
-        ask = ticks.iloc[i]["ask"]
-        if direction == +1:
-            if bid >= tp_price: return True
-            if bid <= stop_price: return False
-        else:
-            if ask <= tp_price: return True
-            if ask >= stop_price: return False
-    return False  # open at EOF -> count as loss
+    if direction == +1:
+        bid_slice = bids[start:]
+        tp_hits = np.flatnonzero(bid_slice >= tp_price)
+        sl_hits = np.flatnonzero(bid_slice <= stop_price)
+    else:
+        ask_slice = asks[start:]
+        tp_hits = np.flatnonzero(ask_slice <= tp_price)
+        sl_hits = np.flatnonzero(ask_slice >= stop_price)
+
+    tp_idx = tp_hits[0] if tp_hits.size else None
+    sl_idx = sl_hits[0] if sl_hits.size else None
+
+    if tp_idx is None and sl_idx is None:
+        return False  # open at EOF -> count as loss
+    if tp_idx is None:
+        return False
+    if sl_idx is None:
+        return True
+    return tp_idx <= sl_idx
 
 
 def load_ticks(path: str) -> pd.DataFrame:
@@ -105,10 +119,18 @@ def main():
                     help="Disable CHOCH; BOS only")
     ap.add_argument("--min-rr", type=float, default=1.0,
                     help="Minimum R/R (reward/risk). 1.0 = drop RR<1:1. 0.0 = disable filter.")
+    ap.add_argument("--min-sl-pips", type=float, default=0.0,
+                    help="Drop trades where risk (entry->SL) is below this value in pips.")
+    ap.add_argument("--min-tp-pips", type=float, default=0.0,
+                    help="Drop trades where reward (entry->TP) is below this value in pips.")
     ap.add_argument("--tp-mode", type=str, default="structure",
                     choices=["structure", "symmetric"],
                     help="TP mode: 'structure' (adapter TP) or 'symmetric' (TP at min_rr*risk).")
     ap.add_argument("--tf", type=int, default=1, help="Unused (CLI compatibility)")
+    ap.add_argument("--smc-sessions", type=str, default="on",
+                    help="SMC session filter (CLI compatibility; currently informational only).")
+    ap.add_argument("--smc-fvg", type=float, default=0.0,
+                    help="Fair value gap filter (CLI compatibility; currently informational only).")
 
     args = ap.parse_args()
     if args.allow_choch_fallback and args.no_choch_fallback:
@@ -116,9 +138,15 @@ def main():
 
     pip = float(args.pip_size)
     min_rr = max(0.0, float(args.min_rr))
+    min_sl_pips = max(0.0, float(args.min_sl_pips))
+    min_tp_pips = max(0.0, float(args.min_tp_pips))
     tp_mode = args.tp_mode
 
     ticks = load_ticks(args.csv)
+
+    bid_arr = ticks["bid"].to_numpy(dtype=float)
+    ask_arr = ticks["ask"].to_numpy(dtype=float)
+    time_arr = ticks["time"].to_numpy()
 
     # 1) Entries from adapter (structure-based SL/TP)
     entries_raw = generate_entries_with_josh(
@@ -143,9 +171,11 @@ def main():
     # (Entry, entry_price, risk_pips, reward_pips, rr_used, stop_price_used, tp_price_used)
 
     dropped_rr = 0
+    dropped_sl = 0
+    dropped_tp = 0
     for e in entries:
         # entry side price
-        entry_side_price = ticks.iloc[e.tick_idx]["ask"] if e.direction == +1 else ticks.iloc[e.tick_idx]["bid"]
+        entry_side_price = float(ask_arr[e.tick_idx] if e.direction == +1 else bid_arr[e.tick_idx])
 
         # risk (pips) from entry to SL
         if e.direction == +1:
@@ -153,11 +183,18 @@ def main():
         else:
             risk_pips = max(0.0, (e.stop_price - entry_side_price) / pip)
 
+        if risk_pips + 1e-12 < min_sl_pips:
+            dropped_sl += 1
+            continue
+
         # Choose TP
         if tp_mode == "structure":
             tp_price_used = e.tp_price
             reward_pips = max(0.0, (tp_price_used - entry_side_price) / pip) if e.direction == +1 \
                           else max(0.0, (entry_side_price - tp_price_used) / pip)
+            if reward_pips + 1e-12 < min_tp_pips:
+                dropped_tp += 1
+                continue
             rr = (float("inf") if risk_pips == 0 and reward_pips > 0
                   else (0.0 if risk_pips == 0 else reward_pips / risk_pips))
             # RR filter
@@ -167,6 +204,9 @@ def main():
         else:  # symmetric
             # Set reward to at least min_rr * risk
             target_reward_pips = min_rr * risk_pips
+            if target_reward_pips + 1e-12 < min_tp_pips:
+                dropped_tp += 1
+                continue
             if e.direction == +1:
                 tp_price_used = entry_side_price + target_reward_pips * pip
             else:
@@ -185,6 +225,10 @@ def main():
 
     if dropped_rr > 0 and tp_mode == "structure":
         print(f"Filtered out by RR < {min_rr}: {dropped_rr} trades (kept {len(prepared)}).")
+    if dropped_sl > 0:
+        print(f"Filtered out by risk < {min_sl_pips} pips: {dropped_sl} trades.")
+    if dropped_tp > 0:
+        print(f"Filtered out by reward < {min_tp_pips} pips: {dropped_tp} trades.")
 
     # 3) Simulate outcomes
     base_wins = plus_wins = 0
@@ -195,21 +239,18 @@ def main():
         tqdm(prepared, desc="Simulating", unit="trade")
     ):
         # entry time string
-        entry_ts = ticks.iloc[e.tick_idx]["time"]
-        try:
-            entry_time_str = entry_ts.isoformat()
-        except AttributeError:
-            entry_time_str = str(entry_ts)
+        entry_ts = pd.Timestamp(time_arr[e.tick_idx])
+        entry_time_str = entry_ts.isoformat() if not pd.isna(entry_ts) else ""
 
         # Base outcome (chosen TP mode)
         base_win = simulate_until_exit(
-            ticks, e.tick_idx, e.direction, stop_price_used, tp_price_used
+            bid_arr, ask_arr, e.tick_idx, e.direction, stop_price_used, tp_price_used
         )
 
         # +1 pip stop (same TP)
         stop_plus = stop_price_used - pip if e.direction == +1 else stop_price_used + pip
         plus_win = simulate_until_exit(
-            ticks, e.tick_idx, e.direction, stop_plus, tp_price_used
+            bid_arr, ask_arr, e.tick_idx, e.direction, stop_plus, tp_price_used
         )
 
         base_wins += int(base_win)
