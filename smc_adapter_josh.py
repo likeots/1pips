@@ -181,7 +181,10 @@ def generate_entries_with_josh(
     col_fvg_mitigated = _col(fvgs, "MitigatedIndex")
 
     # 5) подготовка утилит
-    base_times = df_ticks["time"].to_numpy()
+    # Работать с tz-aware Timestamp напрямую в numpy непросто: searchsorted
+    # пытается сравнивать tz-aware и tz-naive представления и падает.
+    # Поэтому приводим времена к числу наносекунд от эпохи (UTC).
+    base_times = df_ticks["time"].apply(lambda x: x.value).to_numpy()
     tol = float(retest_tolerance_pips) * float(pip)
     max_retest_bars = max(1, int(max_retest_minutes))
 
@@ -191,8 +194,10 @@ def generate_entries_with_josh(
             end_ts = pd.to_datetime(m1.loc[minute_idx + 1, "time"], utc=True)
         else:
             end_ts = start_ts + pd.Timedelta(minutes=1)
-        start = int(np.searchsorted(base_times, start_ts.to_datetime64()))
-        end = int(np.searchsorted(base_times, end_ts.to_datetime64(), side="left"))
+        start_val = start_ts.value
+        end_val = end_ts.value
+        start = int(np.searchsorted(base_times, start_val))
+        end = int(np.searchsorted(base_times, end_val, side="left"))
         if start >= len(base_times):
             start = len(base_times) - 1
         start = max(0, start)
