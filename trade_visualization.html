@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>One Pip Strategy Trade Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #111827;
+      color: #e5e7eb;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: linear-gradient(160deg, #0f172a 0%, #111827 50%, #0b1120 100%);
+    }
+
+    header {
+      padding: 2.5rem clamp(1rem, 4vw, 3rem);
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.6);
+    }
+
+    header h1 {
+      margin: 0 0 1rem 0;
+      font-size: clamp(1.8rem, 3vw, 2.7rem);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 60ch;
+      color: rgba(226, 232, 240, 0.75);
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    main {
+      flex: 1;
+      padding: clamp(1.5rem, 3vw, 3.5rem);
+      display: grid;
+      gap: 2rem;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      align-items: end;
+      background: rgba(15, 23, 42, 0.75);
+      padding: 1.5rem;
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+    }
+
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: rgba(148, 163, 184, 0.9);
+    }
+
+    .control input,
+    .control select {
+      font: inherit;
+      padding: 0.65rem 0.8rem;
+      border-radius: 0.75rem;
+      border: 1px solid rgba(100, 116, 139, 0.45);
+      background: rgba(15, 23, 42, 0.9);
+      color: inherit;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .control input[type="file"] {
+      padding: 0.4rem 0.8rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px dashed rgba(100, 116, 139, 0.5);
+      cursor: pointer;
+    }
+
+    .control input:focus,
+    .control select:focus {
+      outline: none;
+      border-color: rgba(99, 102, 241, 0.65);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+    }
+
+    .control .control-help {
+      text-transform: none;
+      letter-spacing: normal;
+      font-size: 0.75rem;
+      color: rgba(148, 163, 184, 0.65);
+    }
+
+    .summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.5rem;
+      background: rgba(15, 23, 42, 0.75);
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem;
+    }
+
+    .summary-card {
+      padding: 1rem;
+      background: rgba(30, 41, 59, 0.9);
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 30px rgba(15, 23, 42, 0.35);
+    }
+
+    .summary-card h3 {
+      margin: 0;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(148, 163, 184, 0.85);
+    }
+
+    .summary-card p {
+      margin: 0.35rem 0 0 0;
+      font-size: clamp(1.2rem, 2.5vw, 1.8rem);
+      font-weight: 600;
+    }
+
+    .trade-list {
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .trade-card {
+      background: rgba(15, 23, 42, 0.78);
+      border-radius: 1.25rem;
+      padding: 1.4rem;
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.5);
+      display: grid;
+      gap: 1.2rem;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .notice {
+      margin: 0;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(148, 163, 184, 0.75);
+    }
+
+    .notice[data-tone="error"] {
+      color: #fca5a5;
+    }
+
+    .notice[data-tone="success"] {
+      color: #86efac;
+    }
+
+    .trade-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(99, 102, 241, 0.4);
+    }
+
+    .trade-card header {
+      position: relative;
+      padding: 0;
+      background: none;
+      border: none;
+      box-shadow: none;
+    }
+
+    .trade-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .trade-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .trade-direction {
+      padding: 0.2rem 0.65rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .trade-direction.long {
+      background: rgba(34, 197, 94, 0.15);
+      color: rgb(74, 222, 128);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+    }
+
+    .trade-direction.short {
+      background: rgba(248, 113, 113, 0.15);
+      color: rgb(252, 165, 165);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+    }
+
+    .trade-result {
+      padding: 0.3rem 0.75rem;
+      border-radius: 0.75rem;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      border: 1px solid transparent;
+    }
+
+    .trade-result.win {
+      background: rgba(34, 197, 94, 0.12);
+      color: rgb(134, 239, 172);
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+
+    .trade-result.loss {
+      background: rgba(239, 68, 68, 0.12);
+      color: rgb(248, 150, 150);
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+
+    .trade-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .trade-stat {
+      display: grid;
+      gap: 0.35rem;
+      background: rgba(30, 41, 59, 0.85);
+      padding: 0.9rem;
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .trade-stat span {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(148, 163, 184, 0.75);
+    }
+
+    .trade-stat strong {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .price-track {
+      position: relative;
+      height: 140px;
+      background: linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.75));
+      border-radius: 1rem;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      overflow: hidden;
+      padding: 1.2rem 1.4rem;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+    }
+
+    .price-track::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at top, rgba(148, 163, 184, 0.08), transparent 60%);
+      pointer-events: none;
+    }
+
+    .price-line {
+      position: relative;
+      width: min(560px, 100%);
+      height: 6px;
+      background: rgba(148, 163, 184, 0.2);
+      border-radius: 999px;
+    }
+
+    .price-level {
+      position: absolute;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .price-level .marker {
+      width: 2px;
+      height: 24px;
+      border-radius: 999px;
+    }
+
+    .price-level .label {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.6rem;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45);
+    }
+
+    .price-level.entry .marker {
+      background: rgba(96, 165, 250, 0.9);
+    }
+
+    .price-level.stop .marker {
+      background: rgba(248, 113, 113, 0.9);
+    }
+
+    .price-level.target .marker {
+      background: rgba(74, 222, 128, 0.9);
+    }
+
+    .no-data {
+      text-align: center;
+      padding: 4rem 2rem;
+      border-radius: 1rem;
+      border: 1px dashed rgba(148, 163, 184, 0.25);
+      background: rgba(15, 23, 42, 0.5);
+      color: rgba(148, 163, 184, 0.8);
+      font-size: 0.95rem;
+      letter-spacing: 0.03em;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 0.6rem;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      background: rgba(148, 163, 184, 0.18);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      text-transform: uppercase;
+    }
+
+    footer {
+      padding: 2rem;
+      text-align: center;
+      color: rgba(148, 163, 184, 0.6);
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+    }
+
+    @media (max-width: 720px) {
+      header {
+        position: static;
+      }
+
+      .trade-meta {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .price-track {
+        height: 120px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>One Pip Strategy Trade Explorer</h1>
+    <p>Interactive view of simulated trades generated by <code>one_pip_stop_sensitivity.py</code>. Filter by direction, result, and
+      search by date or trade id to better understand how each position behaved relative to its entry, stop-loss, and take-profit
+      levels.</p>
+  </header>
+  <main>
+    <section class="controls">
+      <label class="control">
+        Direction
+        <select id="directionFilter">
+          <option value="all">All</option>
+          <option value="long">Long</option>
+          <option value="short">Short</option>
+        </select>
+      </label>
+      <label class="control">
+        Result
+        <select id="resultFilter">
+          <option value="all">All</option>
+          <option value="win">Base Target Hit</option>
+          <option value="loss">Stopped Out</option>
+        </select>
+      </label>
+      <label class="control">
+        Search
+        <input id="searchInput" type="search" placeholder="Trade id, date (YYYY-MM-DD)" />
+      </label>
+      <label class="control">
+        Data file
+        <input id="fileInput" type="file" accept=".csv" />
+        <span class="control-help">Use if the CSV does not load automatically.</span>
+      </label>
+      <label class="control">
+        Sort by
+        <select id="sortSelect">
+          <option value="time-desc">Newest first</option>
+          <option value="time-asc">Oldest first</option>
+          <option value="rr-desc">Highest R:R</option>
+          <option value="rr-asc">Lowest R:R</option>
+          <option value="risk-desc">Biggest risk (pips)</option>
+          <option value="risk-asc">Smallest risk (pips)</option>
+        </select>
+      </label>
+    </section>
+
+    <p id="dataStatus" class="notice">Loading trade data…</p>
+
+    <section class="summary" id="summary"></section>
+
+    <section class="trade-list" id="tradeList">
+      <p class="no-data">Loading trade data…</p>
+    </section>
+  </main>
+  <footer>
+    Data source: <code>one_pip_results_detailed.csv</code> · Visual helper for strategy diagnostics.
+  </footer>
+
+  <script>
+    const directionFilter = document.getElementById('directionFilter');
+    const resultFilter = document.getElementById('resultFilter');
+    const searchInput = document.getElementById('searchInput');
+    const sortSelect = document.getElementById('sortSelect');
+    const fileInput = document.getElementById('fileInput');
+    const tradeList = document.getElementById('tradeList');
+    const summaryEl = document.getElementById('summary');
+    const dataStatus = document.getElementById('dataStatus');
+    let trades = [];
+
+    const setStatus = (message, tone = 'info') => {
+      if (!dataStatus) return;
+      dataStatus.textContent = message;
+      if (tone === 'info') {
+        delete dataStatus.dataset.tone;
+      } else {
+        dataStatus.dataset.tone = tone;
+      }
+    };
+
+    const formatNumber = (value, digits = 5) => {
+      if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+      return value.toFixed(digits);
+    };
+
+    const formatPips = (value) => {
+      if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+      return `${value.toFixed(1)} pips`;
+    };
+
+    const formatRR = (reward, risk) => {
+      if (!risk) return '—';
+      return `${(reward / risk).toFixed(2)} R`;
+    };
+
+    const parseBool = (value) => value === 'True' || value === true;
+
+    const parseCsv = (text) => {
+      const lines = text.trim().split(/\r?\n/).filter(Boolean);
+      const [header, ...rows] = lines;
+      const keys = header.split(',');
+      return rows.map((row) => {
+        const values = row.split(',');
+        return Object.fromEntries(keys.map((key, index) => [key, values[index]]));
+      });
+    };
+
+    const decorateTrade = (raw) => {
+      const direction = Number(raw.direction);
+      const riskPips = Number(raw.risk_pips);
+      const rewardPips = Number(raw.reward_pips);
+      const trade = {
+        ...raw,
+        trade_id: Number(raw.trade_id),
+        entry_tick_idx: Number(raw.entry_tick_idx),
+        direction,
+        entry_price: Number(raw.entry_price),
+        risk_pips: riskPips,
+        reward_pips: rewardPips,
+        rr_used: Number(raw.rr_used),
+        stop_price_base: Number(raw.stop_price_base),
+        tp_price_used: Number(raw.tp_price_used),
+        stop_price_plus1: Number(raw.stop_price_plus1),
+        base_win: parseBool(raw.base_win),
+        plus1_win: parseBool(raw.plus1_win),
+        i_bar: Number(raw.i_bar),
+        entry_min_idx: Number(raw.entry_min_idx),
+        rrRatio: rewardPips && riskPips ? rewardPips / riskPips : null,
+        entry_date: new Date(raw.entry_time)
+      };
+      return trade;
+    };
+
+    const computeSummary = (collection) => {
+      if (!collection.length) return null;
+      const totals = collection.reduce((acc, trade) => {
+        acc.count += 1;
+        if (trade.base_win) acc.wins += 1;
+        if (!trade.base_win) acc.losses += 1;
+        acc.long += trade.direction === 1 ? 1 : 0;
+        acc.short += trade.direction === -1 ? 1 : 0;
+        acc.totalRisk += trade.risk_pips;
+        acc.totalReward += trade.reward_pips;
+        return acc;
+      }, { count: 0, wins: 0, losses: 0, long: 0, short: 0, totalRisk: 0, totalReward: 0 });
+
+      return {
+        ...totals,
+        winRate: totals.count ? (totals.wins / totals.count) * 100 : 0,
+        avgRisk: totals.count ? totals.totalRisk / totals.count : 0,
+        avgReward: totals.count ? totals.totalReward / totals.count : 0,
+        expectancy: totals.totalRisk ? (totals.totalReward / totals.totalRisk) : 0,
+      };
+    };
+
+    const createPriceTrack = (trade) => {
+      const container = document.createElement('div');
+      container.className = 'price-track';
+      const line = document.createElement('div');
+      line.className = 'price-line';
+      const minPrice = Math.min(trade.entry_price, trade.stop_price_base, trade.tp_price_used);
+      const maxPrice = Math.max(trade.entry_price, trade.stop_price_base, trade.tp_price_used);
+      const range = maxPrice - minPrice || 1;
+
+      const addLevel = (type, price, label) => {
+        const level = document.createElement('div');
+        level.className = `price-level ${type}`;
+        level.style.left = `${((price - minPrice) / range) * 100}%`;
+
+        const marker = document.createElement('div');
+        marker.className = 'marker';
+        const caption = document.createElement('div');
+        caption.className = 'label';
+        caption.textContent = `${label}: ${formatNumber(price, 5)}`;
+
+        level.append(marker, caption);
+        line.appendChild(level);
+      };
+
+      addLevel('stop', trade.stop_price_base, 'Stop');
+      addLevel('entry', trade.entry_price, 'Entry');
+      addLevel('target', trade.tp_price_used, 'Target');
+
+      container.appendChild(line);
+      return container;
+    };
+
+    const renderSummary = (summary, totalCount) => {
+      if (!totalCount) {
+        summaryEl.innerHTML = '<p class="no-data">Load a CSV file to see trade metrics.</p>';
+        return;
+      }
+
+      if (!summary) {
+        summaryEl.innerHTML = '<p class="no-data">No trades match the current filters.</p>';
+        return;
+      }
+
+      summaryEl.innerHTML = `
+        <div>
+          <h2 style="margin: 0 0 0.4rem 0; font-size: 1rem; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(148, 163, 184, 0.75);">
+            Showing ${summary.count} of ${totalCount} trades
+          </h2>
+          <div class="badge">Win rate ${summary.winRate.toFixed(1)}%</div>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-card"><h3>Total Wins</h3><p>${summary.wins}</p></div>
+          <div class="summary-card"><h3>Total Losses</h3><p>${summary.losses}</p></div>
+          <div class="summary-card"><h3>Long vs Short</h3><p>${summary.long} / ${summary.short}</p></div>
+          <div class="summary-card"><h3>Avg Risk</h3><p>${summary.avgRisk.toFixed(1)} pips</p></div>
+          <div class="summary-card"><h3>Avg Reward</h3><p>${summary.avgReward.toFixed(1)} pips</p></div>
+          <div class="summary-card"><h3>Reward / Risk</h3><p>${summary.expectancy.toFixed(2)}×</p></div>
+        </div>`;
+    };
+
+    const renderTrades = (collection) => {
+      if (!collection.length) {
+        if (!trades.length) {
+          tradeList.innerHTML = '<p class="no-data">Load a CSV file to explore simulated trades.</p>';
+        } else {
+          tradeList.innerHTML = '<p class="no-data">No trades match the current filters. Try broadening your search.</p>';
+        }
+        renderSummary(null, trades.length);
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      collection.forEach((trade) => {
+        const card = document.createElement('article');
+        card.className = 'trade-card';
+
+        const tradeHeader = document.createElement('div');
+        tradeHeader.className = 'trade-meta';
+
+        const title = document.createElement('div');
+        title.className = 'trade-title';
+        title.innerHTML = `
+          <span>#${trade.trade_id}</span>
+          <span class="trade-direction ${trade.direction === 1 ? 'long' : 'short'}">${trade.direction === 1 ? 'Long' : 'Short'}</span>
+        `;
+
+        const result = document.createElement('span');
+        result.className = `trade-result ${trade.base_win ? 'win' : 'loss'}`;
+        result.textContent = trade.base_win ? 'Base target hit' : 'Stopped out';
+
+        const time = document.createElement('div');
+        time.className = 'badge';
+        time.textContent = new Date(trade.entry_time).toLocaleString();
+
+        tradeHeader.append(title, time, result);
+        card.appendChild(tradeHeader);
+
+        const stats = document.createElement('div');
+        stats.className = 'trade-grid';
+        stats.innerHTML = `
+          <div class="trade-stat"><span>Entry Price</span><strong>${formatNumber(trade.entry_price)}</strong></div>
+          <div class="trade-stat"><span>Stop Price</span><strong>${formatNumber(trade.stop_price_base)}</strong></div>
+          <div class="trade-stat"><span>Target Price</span><strong>${formatNumber(trade.tp_price_used)}</strong></div>
+          <div class="trade-stat"><span>Risk</span><strong>${formatPips(trade.risk_pips)}</strong></div>
+          <div class="trade-stat"><span>Reward</span><strong>${formatPips(trade.reward_pips)}</strong></div>
+          <div class="trade-stat"><span>Reward / Risk</span><strong>${formatRR(trade.reward_pips, trade.risk_pips)}</strong></div>
+        `;
+
+        card.appendChild(stats);
+        card.appendChild(createPriceTrack(trade));
+        fragment.appendChild(card);
+      });
+
+      tradeList.innerHTML = '';
+      tradeList.appendChild(fragment);
+      renderSummary(computeSummary(collection), trades.length);
+    };
+
+    const filterTrades = () => {
+      const directionValue = directionFilter.value;
+      const resultValue = resultFilter.value;
+      const query = searchInput.value.trim().toLowerCase();
+
+      let filtered = trades;
+
+      if (directionValue !== 'all') {
+        filtered = filtered.filter((trade) => directionValue === 'long' ? trade.direction === 1 : trade.direction === -1);
+      }
+
+      if (resultValue !== 'all') {
+        filtered = filtered.filter((trade) => resultValue === 'win' ? trade.base_win : !trade.base_win);
+      }
+
+      if (query) {
+        filtered = filtered.filter((trade) => {
+          return String(trade.trade_id).includes(query) || trade.entry_time.slice(0, 10).includes(query);
+        });
+      }
+
+      const [sortKey, order] = sortSelect.value.split('-');
+      filtered = [...filtered].sort((a, b) => {
+        if (sortKey === 'time') {
+          return order === 'asc' ? a.entry_date - b.entry_date : b.entry_date - a.entry_date;
+        }
+        if (sortKey === 'rr') {
+          return order === 'asc' ? (a.rrRatio ?? 0) - (b.rrRatio ?? 0) : (b.rrRatio ?? 0) - (a.rrRatio ?? 0);
+        }
+        if (sortKey === 'risk') {
+          return order === 'asc' ? a.risk_pips - b.risk_pips : b.risk_pips - a.risk_pips;
+        }
+        return 0;
+      });
+
+      renderTrades(filtered);
+    };
+
+    const loadTradesFromText = (text, sourceLabel) => {
+      try {
+        const parsed = parseCsv(text);
+        trades = parsed.map(decorateTrade);
+
+        if (!trades.length) {
+          setStatus(`No trades found in ${sourceLabel}.`, 'error');
+          renderTrades([]);
+          return;
+        }
+
+        setStatus(`Loaded ${trades.length} trades from ${sourceLabel}.`, 'success');
+        filterTrades();
+      } catch (error) {
+        console.error(error);
+        setStatus(`Failed to parse ${sourceLabel}: ${error.message}`, 'error');
+        if (!trades.length) {
+          tradeList.innerHTML = `<p class="no-data">Failed to parse data: ${error.message}</p>`;
+          renderSummary(null, trades.length);
+        }
+      }
+    };
+
+    const boot = async () => {
+      try {
+        setStatus('Loading bundled trade data…');
+        const response = await fetch('one_pip_results_detailed.csv');
+        if (!response.ok) throw new Error('Unable to load CSV file');
+        const text = await response.text();
+        loadTradesFromText(text, 'one_pip_results_detailed.csv');
+      } catch (error) {
+        console.error(error);
+        setStatus('Automatic load failed. Use the data file picker to choose your CSV.', 'error');
+        tradeList.innerHTML = '<p class="no-data">Unable to load the CSV automatically. Use the "Data file" control above to choose <code>one_pip_results_detailed.csv</code>.</p>';
+        summaryEl.innerHTML = '<p class="no-data">Waiting for CSV file…</p>';
+      }
+    };
+
+    directionFilter.addEventListener('change', filterTrades);
+    resultFilter.addEventListener('change', filterTrades);
+    searchInput.addEventListener('input', filterTrades);
+    sortSelect.addEventListener('change', filterTrades);
+
+    if (fileInput) {
+      fileInput.addEventListener('change', (event) => {
+        const [file] = event.target.files || [];
+        if (!file) return;
+
+        const reader = new FileReader();
+        setStatus(`Reading ${file.name}…`);
+        reader.onload = () => {
+          loadTradesFromText(reader.result, file.name);
+        };
+        reader.onerror = () => {
+          console.error(reader.error);
+          setStatus(`Failed to read ${file.name}.`, 'error');
+        };
+        reader.readAsText(file);
+        event.target.value = '';
+      });
+    }
+
+    boot();
+  </script>
+</body>
+</html>
