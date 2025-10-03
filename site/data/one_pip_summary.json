@@ -1,0 +1,35 @@
+{
+  "trades_kept": 99,
+  "base": {
+    "wins": 36,
+    "win_rate": 0.36363636363636365
+  },
+  "plus1": {
+    "wins": 38,
+    "win_rate": 0.3838383838383838
+  },
+  "delta_win_rate": 0.020202020202020204,
+  "mcnemar": {
+    "b": 0,
+    "c": 2,
+    "p_value": 0.5
+  },
+  "filters": {
+    "min_rr": null,
+    "min_sl_pips": null,
+    "min_tp_pips": null,
+    "tp_mode": null
+  },
+  "direction_breakdown": {
+    "long": {
+      "trades": 53,
+      "base_win_rate": 0.32075471698113206,
+      "plus1_win_rate": 0.33962264150943394
+    },
+    "short": {
+      "trades": 46,
+      "base_win_rate": 0.41304347826086957,
+      "plus1_win_rate": 0.43478260869565216
+    }
+  }
+}
