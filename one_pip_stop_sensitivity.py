@@ -257,21 +257,24 @@ def main() -> None:
         entry_tick_idx = find_entry_tick_index(tick_times, entry_time)
         entry_price = float(tick_asks[entry_tick_idx] if direction == 1 else tick_bids[entry_tick_idx])
 
+        swing_extreme = float(protective_price)
         if direction == 1:
-            swing_stop_price = float(protective_price)
-            stop_price_base = swing_stop_price - args.sl_margin_pips * pip
-            stop_pips = (entry_price - stop_price_base) / pip
+            stop_price_swing = swing_extreme - args.sl_margin_pips * pip
+            stop_price_plus1 = stop_price_swing - pip
+            stop_pips_swing = (entry_price - stop_price_swing) / pip
+            stop_pips_plus1 = (entry_price - stop_price_plus1) / pip
         else:
-            swing_stop_price = float(protective_price)
-            stop_price_base = swing_stop_price + args.sl_margin_pips * pip
-            stop_pips = (stop_price_base - entry_price) / pip
+            stop_price_swing = swing_extreme + args.sl_margin_pips * pip
+            stop_price_plus1 = stop_price_swing + pip
+            stop_pips_swing = (stop_price_swing - entry_price) / pip
+            stop_pips_plus1 = (stop_price_plus1 - entry_price) / pip
 
-        if stop_pips <= 0 or stop_pips + 1e-9 < args.min_sl_pips:
+        if stop_pips_swing <= 0 or stop_pips_swing + 1e-9 < args.min_sl_pips:
             filtered_sl += 1
             continue
 
         if args.tp_mode == "rr":
-            tp_pips = stop_pips * args.rr
+            tp_pips = stop_pips_swing * args.rr
             if tp_pips <= 0 or tp_pips + 1e-9 < args.min_tp_pips:
                 filtered_tp += 1
                 continue
@@ -293,8 +296,6 @@ def main() -> None:
                 filtered_tp += 1
                 continue
 
-        stop_price_plus1 = stop_price_base - pip if direction == 1 else stop_price_base + pip
-
         trade_counter += 1
         if trade_counter % tf != 0:
             continue
@@ -304,11 +305,12 @@ def main() -> None:
                 "entry_time": entry_time.isoformat(),
                 "direction": "long" if direction == 1 else "short",
                 "entry_price": entry_price,
-                "swing_stop_price": swing_stop_price,
-                "stop_price_base": stop_price_base,
+                "swing_extreme": swing_extreme,
+                "stop_price_swing": stop_price_swing,
                 "stop_price_plus1": stop_price_plus1,
                 "tp_price": tp_price,
-                "stop_pips": stop_pips,
+                "stop_pips_swing": stop_pips_swing,
+                "stop_pips_plus1": stop_pips_plus1,
                 "tp_pips": tp_pips,
                 "entry_idx": entry_tick_idx,
                 "direction_sign": direction,
@@ -322,28 +324,28 @@ def main() -> None:
         print(f"Trades filtered by min_sl_pips: {filtered_sl}")
         print(f"Trades filtered by min_tp_pips: {filtered_tp}")
         print(f"Trades skipped (no protective swing): {skipped_no_opposite}")
-        print("No trades qualified. Summary: trades=0, base_wr=0.0, plus_wr=0.0, delta=0.0")
+        print("No trades qualified. Summary: trades=0, swing_wr=0.0, plus_wr=0.0, delta=0.0")
         print("McNemar b: 0, c: 0, exact p-value: 1.0")
         return
 
     results: List[Dict[str, object]] = []
-    base_wins = plus1_wins = 0
+    swing_wins = plus1_wins = 0
     b = c = 0
 
     for trade in tqdm(trades, desc="Simulating", unit="trade"):
-        base_win, plus_win = evaluate_variants(
+        swing_win, plus_win = evaluate_variants(
             tick_bids,
             tick_asks,
             trade["entry_idx"],
             trade["direction_sign"],
-            [trade["stop_price_base"], trade["stop_price_plus1"]],
+            [trade["stop_price_swing"], trade["stop_price_plus1"]],
             trade["tp_price"],
         )
-        base_wins += int(base_win)
+        swing_wins += int(swing_win)
         plus1_wins += int(plus_win)
-        if (not base_win) and plus_win:
+        if (not swing_win) and plus_win:
             b += 1
-        elif base_win and (not plus_win):
+        elif swing_win and (not plus_win):
             c += 1
 
         results.append(
@@ -351,21 +353,22 @@ def main() -> None:
                 "entry_time": trade["entry_time"],
                 "direction": trade["direction"],
                 "entry_price": trade["entry_price"],
-                "swing_stop_price": trade["swing_stop_price"],
-                "stop_price_base": trade["stop_price_base"],
+                "protective_swing": trade["swing_extreme"],
+                "stop_price_swing": trade["stop_price_swing"],
                 "stop_price_plus1": trade["stop_price_plus1"],
                 "tp_price": trade["tp_price"],
-                "stop_pips": trade["stop_pips"],
+                "stop_pips_swing": trade["stop_pips_swing"],
+                "stop_pips_plus1": trade["stop_pips_plus1"],
                 "tp_pips": trade["tp_pips"],
-                "won_base": bool(base_win),
+                "won_swing": bool(swing_win),
                 "won_plus1": bool(plus_win),
             }
         )
 
     trades_count = len(results)
-    base_wr = base_wins / trades_count
+    swing_wr = swing_wins / trades_count
     plus_wr = plus1_wins / trades_count
-    delta_wr = plus_wr - base_wr
+    delta_wr = plus_wr - swing_wr
     p_value = mcnemar_exact(b, c)
 
     print(f"Bullish BOS detected: {bos_bullish}")
@@ -376,14 +379,34 @@ def main() -> None:
     print(f"Trades skipped (no protective swing): {skipped_no_opposite}")
 
     print(f"Trades: {trades_count}")
-    print(f"Base win rate: {base_wr:.6f}")
+    print(f"Swing win rate: {swing_wr:.6f}")
     print(f"Plus1 win rate: {plus_wr:.6f}")
     print(f"Delta win rate: {delta_wr:.6f}")
-    print(f"McNemar b (base loss, plus1 win): {b}")
-    print(f"McNemar c (base win, plus1 loss): {c}")
+    print(f"McNemar b (swing loss, plus1 win): {b}")
+    print(f"McNemar c (swing win, plus1 loss): {c}")
     print(f"McNemar exact p-value: {p_value:.6f}")
 
-    pd.DataFrame(results).to_csv("one_pip_results_detailed.csv", index=False)
+    results_df = (
+        pd.DataFrame(results)[
+            [
+                "entry_time",
+                "direction",
+                "entry_price",
+                "protective_swing",
+                "stop_price_swing",
+                "stop_pips_swing",
+                "stop_price_plus1",
+                "stop_pips_plus1",
+                "tp_price",
+                "tp_pips",
+                "won_swing",
+                "won_plus1",
+            ]
+        ]
+    ).copy()
+    numeric_cols = results_df.select_dtypes(include=[np.number]).columns
+    results_df.loc[:, numeric_cols] = results_df.loc[:, numeric_cols].round(6)
+    results_df.to_csv("one_pip_results_detailed.csv", index=False)
     print("Detailed results saved to one_pip_results_detailed.csv")
 
 
