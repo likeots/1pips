@@ -8,8 +8,8 @@ Pipeline:
 2) Adapter (smc_adapter_josh.generate_entries_with_josh):
    - ticks -> M1,
    - BOS/CHOCH by smartmoneyconcepts,
-   - first retest -> entry,
-   - SL behind opposite minute swing; TP behind structural swing (adapter outputs).
+   - retest of SMC order-block with optional FVG confirmation -> entry,
+   - SL behind liquidity swing/order-block; TP behind structural swing (adapter outputs).
 3) Choose TP mode:
    - structure: use adapter TP (may yield RR<1).
    - symmetric: set TP at min_rr * risk from entry (guarantee RR>=min_rr).
@@ -95,10 +95,14 @@ def main():
                     help="swing_length for SMC swings (default=50)")
     ap.add_argument("--retest-tolerance-pips", type=float, default=0.2,
                     help="Retest touch tolerance in pips")
+    ap.add_argument("--max-retest-minutes", type=int, default=360,
+                    help="Maximum minutes to wait for an order-block retest")
     ap.add_argument("--sl-beyond-swing-pips", type=float, default=0.0,
                     help="Extra SL beyond swing in pips")
     ap.add_argument("--tp-beyond-swing-pips", type=float, default=0.0,
                     help="Extra TP beyond swing in pips (structure mode)")
+    ap.add_argument("--no-fvg-confirmation", action="store_true",
+                    help="Disable FVG confirmation filter for entries")
     ap.add_argument("--allow-choch-fallback", action="store_true",
                     help="Allow CHOCH if no BOS on the bar")
     ap.add_argument("--no-choch-fallback", action="store_true",
@@ -130,6 +134,8 @@ def main():
         retest_tolerance_pips=float(args.retest_tolerance_pips),
         sl_margin_pips=float(args.sl_beyond_swing_pips),
         tp_margin_pips=float(args.tp_beyond_swing_pips),
+        require_fvg_confirmation=(not args.no_fvg_confirmation),
+        max_retest_minutes=int(args.max_retest_minutes),
         debug_log_path="smc_lib_debug.csv",
     )
     if not entries_raw:
