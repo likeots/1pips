@@ -3,6 +3,7 @@
 """One-pip stop-loss sensitivity simulator with internal BOS detection."""
 import argparse
 import math
+from decimal import Decimal, localcontext
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
@@ -160,12 +161,25 @@ def evaluate_variants(
     return results
 
 
-def mcnemar_exact(b: int, c: int) -> float:
+def mcnemar_exact(b: int, c: int) -> Decimal:
     n = b + c
     if n == 0:
-        return 1.0
-    tail = sum(math.comb(n, k) for k in range(0, min(b, c) + 1)) * (0.5 ** n)
-    return min(1.0, 2.0 * tail)
+        return Decimal(1)
+
+    limit = min(b, c)
+    with localcontext() as ctx:
+        ctx.prec = max(28, int(n * math.log10(2)) + 10)
+        inv_two_pow = Decimal(1) / (Decimal(2) ** n)
+        tail = Decimal(0)
+        for k in range(limit + 1):
+            tail += Decimal(math.comb(n, k)) * inv_two_pow
+        p_value = tail * 2
+    return p_value if p_value <= 1 else Decimal(1)
+
+
+def format_p_value(p_value: Decimal) -> str:
+    threshold = Decimal("1e-6")
+    return f"{p_value:.3E}" if p_value < threshold else f"{p_value:.6f}"
 
 
 def main() -> None:
@@ -325,7 +339,10 @@ def main() -> None:
         print(f"Trades filtered by min_tp_pips: {filtered_tp}")
         print(f"Trades skipped (no protective swing): {skipped_no_opposite}")
         print("No trades qualified. Summary: trades=0, swing_wr=0.0, plus_wr=0.0, delta=0.0")
-        print("McNemar b: 0, c: 0, exact p-value: 1.0")
+        print(
+            "McNemar b: 0, c: 0, exact p-value: "
+            + format_p_value(Decimal(1))
+        )
         return
 
     results: List[Dict[str, object]] = []
@@ -384,7 +401,7 @@ def main() -> None:
     print(f"Delta win rate: {delta_wr:.6f}")
     print(f"McNemar b (swing loss, plus1 win): {b}")
     print(f"McNemar c (swing win, plus1 loss): {c}")
-    print(f"McNemar exact p-value: {p_value:.6f}")
+    print(f"McNemar exact p-value: {format_p_value(p_value)}")
 
     results_df = (
         pd.DataFrame(results)[
