@@ -3,7 +3,7 @@
 """One-pip stop-loss sensitivity simulator with internal BOS detection."""
 import argparse
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -79,13 +79,29 @@ def detect_swings(candles: pd.DataFrame, lookback: int) -> Tuple[np.ndarray, np.
     if lookback <= 0:
         return swing_high, swing_low
 
-    for i in range(lookback, n - lookback):
-        high = highs[i]
-        low = lows[i]
-        if np.all(high > highs[i - lookback : i]) and np.all(high > highs[i + 1 : i + 1 + lookback]):
-            swing_high[i] = True
-        if np.all(low < lows[i - lookback : i]) and np.all(low < lows[i + 1 : i + 1 + lookback]):
-            swing_low[i] = True
+    if lookback * 2 >= n:
+        return swing_high, swing_low
+
+    # Use numpy sliding windows to minimise Python overhead per candle.
+    window = lookback * 2 + 1
+    high_windows = np.lib.stride_tricks.sliding_window_view(highs, window)
+    low_windows = np.lib.stride_tricks.sliding_window_view(lows, window)
+
+    centers = slice(lookback, n - lookback)
+    center_highs = highs[centers]
+    center_lows = lows[centers]
+
+    left_high = high_windows[:, :lookback]
+    right_high = high_windows[:, lookback + 1 :]
+    left_low = low_windows[:, :lookback]
+    right_low = low_windows[:, lookback + 1 :]
+
+    swing_high[lookback : n - lookback] = (center_highs[:, None] > left_high).all(axis=1) & (
+        center_highs[:, None] > right_high
+    ).all(axis=1)
+    swing_low[lookback : n - lookback] = (center_lows[:, None] < left_low).all(axis=1) & (
+        center_lows[:, None] < right_low
+    ).all(axis=1)
     return swing_high, swing_low
 
 
@@ -96,30 +112,52 @@ def find_entry_tick_index(tick_times: np.ndarray, entry_time: pd.Timestamp) -> i
     return idx
 
 
-def simulate_trade(
-    ticks: pd.DataFrame,
+def evaluate_variants(
+    bids: np.ndarray,
+    asks: np.ndarray,
     entry_idx: int,
     direction: int,
-    stop_price: float,
+    stop_prices: Iterable[float],
     tp_price: float,
-) -> bool:
-    if entry_idx < 0 or entry_idx >= len(ticks):
-        return False
+) -> List[bool]:
+    """Return win flags for the provided stop prices."""
 
-    for i in range(entry_idx + 1, len(ticks)):
-        bid = ticks.iloc[i]["bid"]
-        ask = ticks.iloc[i]["ask"]
-        if direction == 1:
-            if bid >= tp_price:
-                return True
-            if bid <= stop_price:
-                return False
-        else:
-            if ask <= tp_price:
-                return True
-            if ask >= stop_price:
-                return False
-    return False
+    stops = list(stop_prices)
+    if entry_idx >= len(bids) - 1:
+        return [False for _ in stops]
+
+    results: List[bool] = []
+    if direction == 1:
+        path = bids[entry_idx + 1 :]
+        tp_hits = np.flatnonzero(path >= tp_price)
+        tp_hit_idx = int(tp_hits[0]) if tp_hits.size else None
+        for stop_price in stops:
+            sl_hits = np.flatnonzero(path <= stop_price)
+            sl_hit_idx = int(sl_hits[0]) if sl_hits.size else None
+            if tp_hit_idx is None and sl_hit_idx is None:
+                results.append(False)
+            elif tp_hit_idx is None:
+                results.append(False)
+            elif sl_hit_idx is None:
+                results.append(True)
+            else:
+                results.append(tp_hit_idx <= sl_hit_idx)
+    else:
+        path = asks[entry_idx + 1 :]
+        tp_hits = np.flatnonzero(path <= tp_price)
+        tp_hit_idx = int(tp_hits[0]) if tp_hits.size else None
+        for stop_price in stops:
+            sl_hits = np.flatnonzero(path >= stop_price)
+            sl_hit_idx = int(sl_hits[0]) if sl_hits.size else None
+            if tp_hit_idx is None and sl_hit_idx is None:
+                results.append(False)
+            elif tp_hit_idx is None:
+                results.append(False)
+            elif sl_hit_idx is None:
+                results.append(True)
+            else:
+                results.append(tp_hit_idx <= sl_hit_idx)
+    return results
 
 
 def mcnemar_exact(b: int, c: int) -> float:
@@ -152,6 +190,8 @@ def main() -> None:
     lows = candles["Low"].to_numpy()
     closes = candles["Close"].to_numpy()
     tick_times = ticks["time"].to_numpy()
+    tick_bids = ticks["bid"].to_numpy()
+    tick_asks = ticks["ask"].to_numpy()
 
     bos_bullish = bos_bearish = 0
     filtered_session = filtered_sl = filtered_tp = 0
@@ -215,8 +255,7 @@ def main() -> None:
             continue
 
         entry_tick_idx = find_entry_tick_index(tick_times, entry_time)
-        entry_tick = ticks.iloc[entry_tick_idx]
-        entry_price = float(entry_tick["ask"] if direction == 1 else entry_tick["bid"])
+        entry_price = float(tick_asks[entry_tick_idx] if direction == 1 else tick_bids[entry_tick_idx])
 
         if direction == 1:
             swing_stop_price = float(protective_price)
@@ -292,11 +331,13 @@ def main() -> None:
     b = c = 0
 
     for trade in tqdm(trades, desc="Simulating", unit="trade"):
-        base_win = simulate_trade(
-            ticks, trade["entry_idx"], trade["direction_sign"], trade["stop_price_base"], trade["tp_price"]
-        )
-        plus_win = simulate_trade(
-            ticks, trade["entry_idx"], trade["direction_sign"], trade["stop_price_plus1"], trade["tp_price"]
+        base_win, plus_win = evaluate_variants(
+            tick_bids,
+            tick_asks,
+            trade["entry_idx"],
+            trade["direction_sign"],
+            [trade["stop_price_base"], trade["stop_price_plus1"]],
+            trade["tp_price"],
         )
         base_wins += int(base_win)
         plus1_wins += int(plus_win)
