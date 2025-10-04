@@ -1,261 +1,349 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-One-pip stop-loss sensitivity simulator (TP modes + RR filter)
-
-Pipeline:
-1) Load tick CSV: time (ISO8601), bid, ask.
-2) Adapter (smc_adapter_josh.generate_entries_with_josh):
-   - ticks -> M1,
-   - BOS/CHOCH by smartmoneyconcepts,
-   - first retest -> entry,
-   - SL behind opposite minute swing; TP behind structural swing (adapter outputs).
-3) Choose TP mode:
-   - structure: use adapter TP (may yield RR<1).
-   - symmetric: set TP at min_rr * risk from entry (guarantee RR>=min_rr).
-4) Filter trades by RR (>= --min-rr).
-5) Simulate tick-by-tick:
-   - base: given stop,
-   - plus1: stop widened by +1 pip (same TP as chosen by mode).
-6) Save detailed CSV with entry_time, entry_price, RR fields.
-
-Requires: pandas, tqdm, smartmoneyconcepts; local smc_adapter_josh.py
-"""
+"""One-pip stop-loss sensitivity simulator with internal BOS detection."""
 import argparse
-from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+import math
+from typing import Dict, List, Tuple
+
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from smc_adapter_josh import generate_entries_with_josh
 
 
-@dataclass
-class Entry:
-    tick_idx: int
-    direction: int     # +1 long, -1 short
-    stop_pips: float
-    tp_pips: float
-    stop_price: float
-    tp_price: float
-    meta: Dict[str, Any]
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="One-pip stop-loss sensitivity simulator")
+    parser.add_argument("--csv", type=str, required=True, help="Tick CSV: time,bid,ask")
+    parser.add_argument("--pip-size", type=float, required=True, help="Instrument pip size")
+    parser.add_argument("--swing-lookback", type=int, default=3, help="Lookback window for swings")
+    parser.add_argument(
+        "--sessions",
+        choices=["on", "off"],
+        default="off",
+        help="If on, restrict entries to UTC hours 07..17",
+    )
+    parser.add_argument("--sl-margin-pips", type=float, default=1.0, help="SL margin beyond swing")
+    parser.add_argument("--tp-margin-pips", type=float, default=1.0, help="TP margin beyond swing (swing mode)")
+    parser.add_argument("--min-sl-pips", type=float, default=2.0, help="Minimum SL distance in pips")
+    parser.add_argument("--min-tp-pips", type=float, default=2.0, help="Minimum TP distance in pips")
+    parser.add_argument("--tp-mode", choices=["rr", "swing"], default="rr", help="Take-profit mode")
+    parser.add_argument("--rr", type=float, default=1.0, help="Risk-reward multiple for rr mode")
+    parser.add_argument("--tf", type=int, default=1, help="Keep every Nth trade (1 = keep all)")
+    return parser.parse_args()
 
 
-def mcnemar_exact(b: int, c: int) -> float:
-    n = b + c
-    if n == 0:
-        return 1.0
-    from math import comb
-    tail = sum(comb(n, k) for k in range(0, min(b, c) + 1)) * (0.5 ** n)
-    return min(1.0, 2.0 * tail)
+def robust_parse_times(series: pd.Series) -> pd.Series:
+    times = pd.to_datetime(series, utc=True, errors="coerce", format="ISO8601")
+    mask = times.isna()
+    if mask.any():
+        times.loc[mask] = pd.to_datetime(series.loc[mask], utc=True, errors="coerce")
+    return times
 
 
-def simulate_until_exit(
+def load_ticks(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    required = {"time", "bid", "ask"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise SystemExit(f"Missing required columns: {missing}")
+
+    df["time"] = robust_parse_times(df["time"])
+    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
+    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
+    df = df.dropna(subset=["time", "bid", "ask"]).copy()
+    if df.empty:
+        raise SystemExit("No valid tick rows after cleaning")
+
+    df.sort_values("time", inplace=True)
+    df.drop_duplicates(subset="time", keep="first", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+
+def build_candles(ticks: pd.DataFrame) -> pd.DataFrame:
+    ticks = ticks.copy()
+    ticks["mid"] = (ticks["bid"] + ticks["ask"]) / 2.0
+    candles = (
+        ticks.set_index("time")["mid"].resample("1min").ohlc().dropna(how="any")
+    )
+    candles.columns = ["Open", "High", "Low", "Close"]
+    return candles
+
+
+def detect_swings(candles: pd.DataFrame, lookback: int) -> Tuple[np.ndarray, np.ndarray]:
+    n = len(candles)
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
+    highs = candles["High"].to_numpy()
+    lows = candles["Low"].to_numpy()
+
+    if lookback <= 0:
+        return swing_high, swing_low
+
+    for i in range(lookback, n - lookback):
+        high = highs[i]
+        low = lows[i]
+        if np.all(high > highs[i - lookback : i]) and np.all(high > highs[i + 1 : i + 1 + lookback]):
+            swing_high[i] = True
+        if np.all(low < lows[i - lookback : i]) and np.all(low < lows[i + 1 : i + 1 + lookback]):
+            swing_low[i] = True
+    return swing_high, swing_low
+
+
+def find_entry_tick_index(tick_times: np.ndarray, entry_time: pd.Timestamp) -> int:
+    idx = int(np.searchsorted(tick_times, entry_time, side="left"))
+    if idx >= len(tick_times):
+        return len(tick_times) - 1
+    return idx
+
+
+def simulate_trade(
     ticks: pd.DataFrame,
     entry_idx: int,
     direction: int,
     stop_price: float,
     tp_price: float,
 ) -> bool:
-    """
-    Long: exit on BID (TP if bid>=tp, SL if bid<=sl)
-    Short: exit on ASK (TP if ask<=tp, SL if ask>=sl)
-    """
-    if direction not in (+1, -1):
-        raise ValueError("direction must be +1 or -1")
-    if entry_idx < 0 or entry_idx >= len(ticks) - 1:
+    if entry_idx < 0 or entry_idx >= len(ticks):
         return False
 
     for i in range(entry_idx + 1, len(ticks)):
         bid = ticks.iloc[i]["bid"]
         ask = ticks.iloc[i]["ask"]
-        if direction == +1:
-            if bid >= tp_price: return True
-            if bid <= stop_price: return False
+        if direction == 1:
+            if bid >= tp_price:
+                return True
+            if bid <= stop_price:
+                return False
         else:
-            if ask <= tp_price: return True
-            if ask >= stop_price: return False
-    return False  # open at EOF -> count as loss
+            if ask <= tp_price:
+                return True
+            if ask >= stop_price:
+                return False
+    return False
 
 
-def load_ticks(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
-    df["bid"] = pd.to_numeric(df["bid"], errors="coerce")
-    df["ask"] = pd.to_numeric(df["ask"], errors="coerce")
-    df = df.dropna(subset=["time", "bid", "ask"]).reset_index(drop=True)
-    return df
+def mcnemar_exact(b: int, c: int) -> float:
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(0, min(b, c) + 1)) * (0.5 ** n)
+    return min(1.0, 2.0 * tail)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="One-pip SL sensitivity simulator")
-    ap.add_argument("--csv", type=str, required=True, help="Tick CSV: time,bid,ask")
-    ap.add_argument("--pip-size", type=float, required=True,
-                    help="Pip size (EURUSD=0.0001, XAUUSD=0.1 etc.)")
-    ap.add_argument("--smc-swing-lookback", type=int, default=50,
-                    help="swing_length for SMC swings (default=50)")
-    ap.add_argument("--retest-tolerance-pips", type=float, default=0.2,
-                    help="Retest touch tolerance in pips")
-    ap.add_argument("--sl-beyond-swing-pips", type=float, default=0.0,
-                    help="Extra SL beyond swing in pips")
-    ap.add_argument("--tp-beyond-swing-pips", type=float, default=0.0,
-                    help="Extra TP beyond swing in pips (structure mode)")
-    ap.add_argument("--allow-choch-fallback", action="store_true",
-                    help="Allow CHOCH if no BOS on the bar")
-    ap.add_argument("--no-choch-fallback", action="store_true",
-                    help="Disable CHOCH; BOS only")
-    ap.add_argument("--min-rr", type=float, default=1.0,
-                    help="Minimum R/R (reward/risk). 1.0 = drop RR<1:1. 0.0 = disable filter.")
-    ap.add_argument("--tp-mode", type=str, default="structure",
-                    choices=["structure", "symmetric"],
-                    help="TP mode: 'structure' (adapter TP) or 'symmetric' (TP at min_rr*risk).")
-    ap.add_argument("--tf", type=int, default=1, help="Unused (CLI compatibility)")
+def main() -> None:
+    args = parse_args()
 
-    args = ap.parse_args()
-    if args.allow_choch_fallback and args.no_choch_fallback:
-        raise SystemExit("Use either --allow-choch-fallback or --no-choch-fallback, not both.")
-
+    if args.sl_margin_pips <= 0:
+        raise SystemExit("--sl-margin-pips must be positive to keep stops beyond swings")
+    if args.tp_mode == "rr":
+        if not (0.5 <= args.rr <= 3.0):
+            raise SystemExit("--rr must be within [0.5, 3.0]")
     pip = float(args.pip_size)
-    min_rr = max(0.0, float(args.min_rr))
-    tp_mode = args.tp_mode
+    tf = max(1, int(args.tf))
 
     ticks = load_ticks(args.csv)
+    candles = build_candles(ticks)
+    if candles.empty:
+        raise SystemExit("No candles constructed from ticks")
 
-    # 1) Entries from adapter (structure-based SL/TP)
-    entries_raw = generate_entries_with_josh(
-        ticks=ticks,
-        pip=pip,
-        swing_lookback=int(args.smc_swing_lookback),
-        use_bos=True,
-        allow_choch_fallback=(not args.no_choch_fallback),
-        retest_tolerance_pips=float(args.retest_tolerance_pips),
-        sl_margin_pips=float(args.sl_beyond_swing_pips),
-        tp_margin_pips=float(args.tp_beyond_swing_pips),
-        debug_log_path="smc_lib_debug.csv",
-    )
-    if not entries_raw:
-        print("No entries produced by adapter. Check smc_lib_debug.csv for reasons.")
-        return
+    swing_high_flags, swing_low_flags = detect_swings(candles, int(args.swing_lookback))
 
-    entries: List[Entry] = [Entry(*e) for e in entries_raw]
+    highs = candles["High"].to_numpy()
+    lows = candles["Low"].to_numpy()
+    closes = candles["Close"].to_numpy()
+    tick_times = ticks["time"].to_numpy()
 
-    # 2) Build per-trade parameters depending on TP mode + RR filter
-    prepared: List[Tuple[Entry, float, float, float, float, float, float]] = []
-    # (Entry, entry_price, risk_pips, reward_pips, rr_used, stop_price_used, tp_price_used)
+    bos_bullish = bos_bearish = 0
+    filtered_session = filtered_sl = filtered_tp = 0
+    skipped_no_opposite = 0
 
-    dropped_rr = 0
-    for e in entries:
-        # entry side price
-        entry_side_price = ticks.iloc[e.tick_idx]["ask"] if e.direction == +1 else ticks.iloc[e.tick_idx]["bid"]
+    trades: List[Dict[str, object]] = []
+    trade_counter = 0
 
-        # risk (pips) from entry to SL
-        if e.direction == +1:
-            risk_pips = max(0.0, (entry_side_price - e.stop_price) / pip)
+    last_swing_high_price = None
+    last_swing_low_price = None
+    last_broken_high = None
+    last_broken_low = None
+
+    for i in range(len(candles)):
+        if swing_high_flags[i]:
+            last_swing_high_price = float(highs[i])
+            last_broken_high = None
+        if swing_low_flags[i]:
+            last_swing_low_price = float(lows[i])
+            last_broken_low = None
+
+        direction = 0
+        broken_swing_price = None
+        protective_price = None
+
+        if (
+            last_swing_high_price is not None
+            and closes[i] > last_swing_high_price
+            and last_swing_low_price is not None
+            and last_broken_high != last_swing_high_price
+        ):
+            direction = 1
+            broken_swing_price = last_swing_high_price
+            protective_price = last_swing_low_price
+            bos_bullish += 1
+            last_broken_high = last_swing_high_price
+        elif (
+            last_swing_low_price is not None
+            and closes[i] < last_swing_low_price
+            and last_swing_high_price is not None
+            and last_broken_low != last_swing_low_price
+        ):
+            direction = -1
+            broken_swing_price = last_swing_low_price
+            protective_price = last_swing_high_price
+            bos_bearish += 1
+            last_broken_low = last_swing_low_price
+
+        if direction == 0:
+            continue
+
+        if protective_price is None:
+            skipped_no_opposite += 1
+            continue
+
+        entry_minute_idx = i + 1 if i + 1 < len(candles) else i
+        entry_time = candles.index[entry_minute_idx]
+
+        if args.sessions == "on" and not (7 <= entry_time.hour <= 17):
+            filtered_session += 1
+            continue
+
+        entry_tick_idx = find_entry_tick_index(tick_times, entry_time)
+        entry_tick = ticks.iloc[entry_tick_idx]
+        entry_price = float(entry_tick["ask"] if direction == 1 else entry_tick["bid"])
+
+        if direction == 1:
+            swing_stop_price = float(protective_price)
+            stop_price_base = swing_stop_price - args.sl_margin_pips * pip
+            stop_pips = (entry_price - stop_price_base) / pip
         else:
-            risk_pips = max(0.0, (e.stop_price - entry_side_price) / pip)
+            swing_stop_price = float(protective_price)
+            stop_price_base = swing_stop_price + args.sl_margin_pips * pip
+            stop_pips = (stop_price_base - entry_price) / pip
 
-        # Choose TP
-        if tp_mode == "structure":
-            tp_price_used = e.tp_price
-            reward_pips = max(0.0, (tp_price_used - entry_side_price) / pip) if e.direction == +1 \
-                          else max(0.0, (entry_side_price - tp_price_used) / pip)
-            rr = (float("inf") if risk_pips == 0 and reward_pips > 0
-                  else (0.0 if risk_pips == 0 else reward_pips / risk_pips))
-            # RR filter
-            if rr + 1e-12 < min_rr:
-                dropped_rr += 1
+        if stop_pips <= 0 or stop_pips + 1e-9 < args.min_sl_pips:
+            filtered_sl += 1
+            continue
+
+        if args.tp_mode == "rr":
+            tp_pips = stop_pips * args.rr
+            if tp_pips <= 0 or tp_pips + 1e-9 < args.min_tp_pips:
+                filtered_tp += 1
                 continue
-        else:  # symmetric
-            # Set reward to at least min_rr * risk
-            target_reward_pips = min_rr * risk_pips
-            if e.direction == +1:
-                tp_price_used = entry_side_price + target_reward_pips * pip
+            if direction == 1:
+                tp_price = entry_price + tp_pips * pip
             else:
-                tp_price_used = entry_side_price - target_reward_pips * pip
-            reward_pips = target_reward_pips
-            rr = (float("inf") if risk_pips == 0 and reward_pips > 0 else (0.0 if risk_pips == 0 else reward_pips / risk_pips))
-            # symmetric always meets rr >= min_rr by construction
+                tp_price = entry_price - tp_pips * pip
+        else:  # swing mode
+            if broken_swing_price is None:
+                filtered_tp += 1
+                continue
+            if direction == 1:
+                tp_price = broken_swing_price + args.tp_margin_pips * pip
+                tp_pips = (tp_price - entry_price) / pip
+            else:
+                tp_price = broken_swing_price - args.tp_margin_pips * pip
+                tp_pips = (entry_price - tp_price) / pip
+            if tp_pips <= 0 or tp_pips + 1e-9 < args.min_tp_pips:
+                filtered_tp += 1
+                continue
 
-        stop_price_used = e.stop_price
-        prepared.append((e, float(entry_side_price), float(risk_pips), float(reward_pips), float(rr),
-                         float(stop_price_used), float(tp_price_used)))
+        stop_price_plus1 = stop_price_base - pip if direction == 1 else stop_price_base + pip
 
-    if not prepared:
-        print(f"All trades filtered out by RR (min_rr={min_rr}). Try --tp-mode symmetric or lower --min-rr.")
+        trade_counter += 1
+        if trade_counter % tf != 0:
+            continue
+
+        trades.append(
+            {
+                "entry_time": entry_time.isoformat(),
+                "direction": "long" if direction == 1 else "short",
+                "entry_price": entry_price,
+                "swing_stop_price": swing_stop_price,
+                "stop_price_base": stop_price_base,
+                "stop_price_plus1": stop_price_plus1,
+                "tp_price": tp_price,
+                "stop_pips": stop_pips,
+                "tp_pips": tp_pips,
+                "entry_idx": entry_tick_idx,
+                "direction_sign": direction,
+            }
+        )
+
+    if not trades:
+        print(f"Bullish BOS detected: {bos_bullish}")
+        print(f"Bearish BOS detected: {bos_bearish}")
+        print(f"Trades filtered by sessions: {filtered_session}")
+        print(f"Trades filtered by min_sl_pips: {filtered_sl}")
+        print(f"Trades filtered by min_tp_pips: {filtered_tp}")
+        print(f"Trades skipped (no protective swing): {skipped_no_opposite}")
+        print("No trades qualified. Summary: trades=0, base_wr=0.0, plus_wr=0.0, delta=0.0")
+        print("McNemar b: 0, c: 0, exact p-value: 1.0")
         return
 
-    if dropped_rr > 0 and tp_mode == "structure":
-        print(f"Filtered out by RR < {min_rr}: {dropped_rr} trades (kept {len(prepared)}).")
-
-    # 3) Simulate outcomes
-    base_wins = plus_wins = 0
+    results: List[Dict[str, object]] = []
+    base_wins = plus1_wins = 0
     b = c = 0
-    rows: List[Dict[str, Any]] = []
 
-    for idx, (e, entry_price, risk_pips, reward_pips, rr_used, stop_price_used, tp_price_used) in enumerate(
-        tqdm(prepared, desc="Simulating", unit="trade")
-    ):
-        # entry time string
-        entry_ts = ticks.iloc[e.tick_idx]["time"]
-        try:
-            entry_time_str = entry_ts.isoformat()
-        except AttributeError:
-            entry_time_str = str(entry_ts)
-
-        # Base outcome (chosen TP mode)
-        base_win = simulate_until_exit(
-            ticks, e.tick_idx, e.direction, stop_price_used, tp_price_used
+    for trade in tqdm(trades, desc="Simulating", unit="trade"):
+        base_win = simulate_trade(
+            ticks, trade["entry_idx"], trade["direction_sign"], trade["stop_price_base"], trade["tp_price"]
         )
-
-        # +1 pip stop (same TP)
-        stop_plus = stop_price_used - pip if e.direction == +1 else stop_price_used + pip
-        plus_win = simulate_until_exit(
-            ticks, e.tick_idx, e.direction, stop_plus, tp_price_used
+        plus_win = simulate_trade(
+            ticks, trade["entry_idx"], trade["direction_sign"], trade["stop_price_plus1"], trade["tp_price"]
         )
-
         base_wins += int(base_win)
-        plus_wins += int(plus_win)
-        if base_win and not plus_win: b += 1
-        elif (not base_win) and plus_win: c += 1
+        plus1_wins += int(plus_win)
+        if (not base_win) and plus_win:
+            b += 1
+        elif base_win and (not plus_win):
+            c += 1
 
-        rows.append({
-            "trade_id": idx,
-            "entry_tick_idx": e.tick_idx,
-            "entry_time": entry_time_str,
-            "direction": e.direction,
-            "entry_price": entry_price,
-            "risk_pips": risk_pips,
-            "reward_pips": reward_pips,
-            "rr_used": rr_used,
-            "tp_mode": tp_mode,
-            "stop_price_base": stop_price_used,
-            "tp_price_used": tp_price_used,
-            "stop_price_plus1": stop_plus,
-            "base_win": base_win,
-            "plus1_win": plus_win,
-            "i_bar": e.meta.get("i"),
-            "entry_min_idx": e.meta.get("entry_min_idx"),
-        })
+        results.append(
+            {
+                "entry_time": trade["entry_time"],
+                "direction": trade["direction"],
+                "entry_price": trade["entry_price"],
+                "swing_stop_price": trade["swing_stop_price"],
+                "stop_price_base": trade["stop_price_base"],
+                "stop_price_plus1": trade["stop_price_plus1"],
+                "tp_price": trade["tp_price"],
+                "stop_pips": trade["stop_pips"],
+                "tp_pips": trade["tp_pips"],
+                "won_base": bool(base_win),
+                "won_plus1": bool(plus_win),
+            }
+        )
 
-    # 4) Metrics
-    total = len(prepared)
-    base_wr = base_wins / total
-    plus_wr = plus_wins / total
+    trades_count = len(results)
+    base_wr = base_wins / trades_count
+    plus_wr = plus1_wins / trades_count
     delta_wr = plus_wr - base_wr
-    pval = mcnemar_exact(b, c)
+    p_value = mcnemar_exact(b, c)
 
-    print(f"trades_kept: {total}")
-    print(f"base_wins: {base_wins}")
-    print(f"plus1_wins: {plus_wins}")
-    print(f"base_wr: {base_wr:.6f}")
-    print(f"plus_wr: {plus_wr:.6f}")
-    print(f"delta_wr: {delta_wr:.6f}")
-    print(f"mcnemar_b (base win, plus lose): {b}")
-    print(f"mcnemar_c (base lose, plus win): {c}")
-    print(f"mcnemar_exact_p: {pval:.6f}")
+    print(f"Bullish BOS detected: {bos_bullish}")
+    print(f"Bearish BOS detected: {bos_bearish}")
+    print(f"Trades filtered by sessions: {filtered_session}")
+    print(f"Trades filtered by min_sl_pips: {filtered_sl}")
+    print(f"Trades filtered by min_tp_pips: {filtered_tp}")
+    print(f"Trades skipped (no protective swing): {skipped_no_opposite}")
 
-    pd.DataFrame(rows).to_csv("one_pip_results_detailed.csv", index=False)
-    print("Detailed results saved to: one_pip_results_detailed.csv")
-    print("Adapter debug (reasons) saved to: smc_lib_debug.csv")
+    print(f"Trades: {trades_count}")
+    print(f"Base win rate: {base_wr:.6f}")
+    print(f"Plus1 win rate: {plus_wr:.6f}")
+    print(f"Delta win rate: {delta_wr:.6f}")
+    print(f"McNemar b (base loss, plus1 win): {b}")
+    print(f"McNemar c (base win, plus1 loss): {c}")
+    print(f"McNemar exact p-value: {p_value:.6f}")
+
+    pd.DataFrame(results).to_csv("one_pip_results_detailed.csv", index=False)
+    print("Detailed results saved to one_pip_results_detailed.csv")
 
 
 if __name__ == "__main__":
